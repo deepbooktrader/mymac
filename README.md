@@ -8,7 +8,7 @@ mac使用日常中的小痛点
 
 | 工具 | 解决的问题 | 状态 |
 | --- | --- | --- |
-| [外设电量 · Peripheral Battery](peripheral-battery/) | 一眼查看苹果无线键盘、触控板电量，提前提醒充电 | v1.1，自用版本 |
+| [外设电量 · Peripheral Battery](peripheral-battery/) | 一眼查看苹果无线键盘、触控板电量，提前提醒充电 | v1.2，自用版本 |
 
 ## 界面预览
 

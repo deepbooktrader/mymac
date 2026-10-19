@@ -1,12 +1,22 @@
 import Cocoa
 import SwiftUI
 import IOKit
+import IOKit.ps
+import Darwin
 import UserNotifications
 import ServiceManagement
 
 struct Device {
     let name: String
     let percent: Int
+    var charging: Bool? = nil
+    var externalPower = false
+    var source = "IORegistry"
+    var powerLabel: String {
+        if charging == true { return "正在充电" }
+        if charging == false { return externalPower ? (percent == 100 ? "已充满" : "已接电，未充电") : "电池供电" }
+        return "充电状态未知"
+    }
     var symbol: String {
         switch label { case "键盘": return "keyboard"; case "触控板": return "rectangle.and.hand.point.up.left"; case "鼠标": return "computermouse"; default: return "battery.100percent" }
     }
@@ -18,7 +28,7 @@ struct Device {
         return name
     }
 }
-func readDevices() -> [Device] {
+func readRegistryDevices() -> [Device] {
     var iterator: io_iterator_t = 0
     guard IOServiceGetMatchingServices(kIOMainPortDefault, IOServiceMatching("AppleDeviceManagementHIDEventService"), &iterator) == KERN_SUCCESS else { return [] }
     defer { IOObjectRelease(iterator) }
@@ -33,6 +43,67 @@ func readDevices() -> [Device] {
         result.append(Device(name: name, percent: percent))
     }
     return result.sorted { $0.label < $1.label }
+}
+
+// Apple's accessory-source API is publicly unsupported. Resolve it dynamically;
+// if unavailable, retain the battery reading and explicitly mark charging unknown.
+enum AccessoryPower {
+    typealias CopySources = @convention(c) (Int32) -> Unmanaged<CFTypeRef>?
+    static let handle = dlopen("/System/Library/Frameworks/IOKit.framework/IOKit", RTLD_LAZY)
+    static let copySources: CopySources? = {
+        guard let handle = handle, let symbol = dlsym(handle, "IOPSCopyPowerSourcesByType") else { return nil }
+        return unsafeBitCast(symbol, to: CopySources.self)
+    }()
+}
+func decodeAccessory(_ data: [String: Any]) -> Device? {
+    guard ["Keyboard", "Trackpad", "Mouse"].contains(data["Accessory Category"] as? String ?? ""),
+          (data["Is Present"] as? NSNumber)?.boolValue == true,
+          let name = data["Name"] as? String,
+          let current = data["Current Capacity"] as? Int,
+          let maximum = data["Max Capacity"] as? Int,
+          maximum > 0, current >= 0, current <= maximum else { return nil }
+    let percent = Int((Double(current) / Double(maximum) * 100).rounded())
+    let charging = (data["Is Charging"] as? NSNumber)?.boolValue
+    return Device(name: name, percent: percent, charging: charging,
+                  externalPower: data["Power Source State"] as? String == "AC Power",
+                  source: "macOS 外设电源服务")
+}
+func readDevices() -> [Device] {
+    if let copy = AccessoryPower.copySources,
+       let snapshot = copy(4)?.takeRetainedValue(),
+       let sources = IOPSCopyPowerSourcesList(snapshot)?.takeRetainedValue() as? [CFTypeRef] {
+        let devices = sources.compactMap { source -> Device? in
+            guard let data = IOPSGetPowerSourceDescription(snapshot, source)?.takeUnretainedValue() as? [String: Any] else { return nil }
+            return decodeAccessory(data)
+        }
+        // A valid source snapshot is authoritative, including an empty device list.
+        return devices.sorted { $0.label < $1.label }
+    }
+    return readRegistryDevices()
+}
+func runSelfTests() {
+    var data: [String: Any] = ["Accessory Category": "Keyboard", "Is Present": true, "Name": "Test Keyboard", "Current Capacity": 23, "Max Capacity": 100, "Is Charging": false, "Power Source State": "Battery Power"]
+    precondition(decodeAccessory(data)?.powerLabel == "电池供电")
+    data["Current Capacity"] = 24
+    precondition(decodeAccessory(data)?.charging == false, "Increasing capacity must not imply charging")
+    data["Is Charging"] = true
+    precondition(decodeAccessory(data)?.powerLabel == "正在充电")
+    data["Is Charging"] = false
+    data["Power Source State"] = "AC Power"
+    precondition(decodeAccessory(data)?.powerLabel == "已接电，未充电")
+    data["Current Capacity"] = 100
+    precondition(decodeAccessory(data)?.powerLabel == "已充满")
+    data.removeValue(forKey: "Is Charging")
+    precondition(decodeAccessory(data)?.charging == nil)
+    data["Max Capacity"] = 0
+    precondition(decodeAccessory(data) == nil)
+    data["Max Capacity"] = 100
+    data["Is Present"] = false
+    precondition(decodeAccessory(data) == nil)
+    data["Is Present"] = true
+    data["Accessory Category"] = "Headset"
+    precondition(decodeAccessory(data) == nil)
+    print("PASS: power-state decoding, rising percentage, missing state, invalid capacity, absent device, category filtering")
 }
 
 class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDelegate {
@@ -63,6 +134,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
     }
     func syncModel() {
         model.devices = devices
+        model.lastRead = lastUpdate
         model.notificationState = notificationState
         model.notificationDetail = notificationDetail
         model.threshold = threshold
@@ -71,6 +143,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         model.loginPending = SMAppService.mainApp.status == .requiresApproval
     }
     @objc func showSettings() {
+        refresh()
         updateNotificationState()
         if settingsWindow == nil {
             let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 470, height: 610), styleMask: [.titled, .closable, .miniaturizable], backing: .buffered, defer: false)
@@ -89,7 +162,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         let font = NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .medium)
         for (index, device) in devices.enumerated() {
             if index > 0 { text.append(NSAttributedString(string: "   ", attributes: [.font: font])) }
-            let color: NSColor = device.percent <= 10 ? .systemRed : device.percent <= threshold ? .systemOrange : .labelColor
+            let color: NSColor = device.charging == true ? .systemGreen : device.percent <= 10 ? .systemRed : device.percent <= threshold ? .systemOrange : .labelColor
             if style == 1 {
                 text.append(NSAttributedString(string: displayName(device) + " ", attributes: [.font: font, .foregroundColor: color]))
             } else {
@@ -102,11 +175,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
                     text.append(NSAttributedString(string: " "))
                 }
             }
-            text.append(NSAttributedString(string: "\(device.percent)%", attributes: [.font: font, .foregroundColor: color]))
+            text.append(NSAttributedString(string: "\(device.charging == true ? "⚡ " : "")\(device.percent)%", attributes: [.font: font, .foregroundColor: color]))
         }
         if devices.isEmpty { text.append(NSAttributedString(string: "外设未连接")) }
         item.button?.attributedTitle = text
-        item.button?.toolTip = devices.map { "\(displayName($0))：\($0.percent)%" }.joined(separator: "\n") + "\n每分钟读取系统上报的电量"
+        item.button?.toolTip = devices.map { "\(displayName($0))：\($0.percent)% · \($0.powerLabel)" }.joined(separator: "\n") + "\n每 5 秒读取系统数据，设备上报可能延迟"
     }
     var timer: Timer?
     var devices: [Device] = []
@@ -118,7 +191,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         UNUserNotificationCenter.current().delegate = self
         refresh()
-        timer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in self?.refresh() }
+        let pollingTimer = Timer(timeInterval: 5, repeats: true) { [weak self] _ in self?.refresh() }
+        pollingTimer.tolerance = 0.5
+        RunLoop.main.add(pollingTimer, forMode: .common)
+        timer = pollingTimer
         NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(refresh), name: NSWorkspace.didWakeNotification, object: nil)
         updateNotificationState()
         showSettings()
@@ -133,7 +209,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         for device in devices {
             let key = "lastAlert.\(device.name)"
             if device.percent > threshold + 5 { defaults.removeObject(forKey: key); continue }
-            guard device.percent <= threshold else { continue }
+            guard device.percent <= threshold, device.charging != true, !device.externalPower else { continue }
             let last = defaults.object(forKey: key) as? Date ?? .distantPast
             guard Date().timeIntervalSince(last) >= 6 * 3600 else { continue }
             UNUserNotificationCenter.current().getNotificationSettings { settings in
@@ -164,9 +240,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         _ = add(menu, "电量与个性化设置…", #selector(showSettings))
         menu.addItem(.separator())
         if devices.isEmpty { _ = add(menu, "未检测到已连接的苹果外设") }
-        for d in devices { _ = add(menu, "\(d.name)：\(d.percent)%") }
+        for d in devices { _ = add(menu, "\(d.name)：\(d.percent)% · \(d.powerLabel)") }
         let formatter = DateFormatter(); formatter.dateFormat = "HH:mm:ss"
-        _ = add(menu, "更新于 \(formatter.string(from: lastUpdate)) · 每分钟检查")
+        _ = add(menu, "读取于 \(formatter.string(from: lastUpdate)) · 每 5 秒检查")
         menu.addItem(.separator())
         _ = add(menu, "立即刷新", #selector(refresh))
         let thresholds = NSMenu()
@@ -239,6 +315,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
 }
 class BatteryModel: ObservableObject {
     @Published var devices: [Device] = []
+    @Published var lastRead = Date()
     @Published var notificationState = "正在检查…"
     @Published var notificationDetail = ""
     @Published var threshold = 30
@@ -266,10 +343,11 @@ struct BatterySettings: View {
                             HStack {
                                 Image(systemName: device.symbol).font(.title2)
                                 Spacer()
-                                Text(device.percent <= model.threshold ? "该充电了" : "电量充足").font(.caption).foregroundStyle(.secondary)
+                                Label(device.powerLabel, systemImage: device.charging == true ? "bolt.fill" : "battery.100percent")
+                                    .font(.caption).foregroundStyle(device.charging == true ? .green : .secondary)
                             }
                             Text("\(device.percent)%").font(.system(size: 30, weight: .semibold, design: .rounded)).monospacedDigit()
-                            ProgressView(value: Double(device.percent), total: 100).tint(device.percent <= model.threshold ? .orange : .teal)
+                            ProgressView(value: Double(device.percent), total: 100).tint(device.charging == true ? .green : device.percent <= model.threshold ? .orange : .teal)
                             TextField(device.label, text: Binding(get: { delegate.displayName(device) }, set: { delegate.setName(device, $0) }))
                                 .textFieldStyle(.plain).font(.callout)
                                 .help("点击修改名称；中文样式会使用这个名字")
@@ -309,7 +387,10 @@ struct BatterySettings: View {
                 Toggle("登录后自动启动", isOn: Binding(get: { model.loginEnabled }, set: { _ in delegate.toggleLogin() }))
                 if model.loginPending { Text("请在系统设置 → 通用 → 登录项中允许启动。").font(.caption).foregroundStyle(.orange) }
                 HStack {
-                    Text("每分钟更新 · 完全本地运行").font(.caption).foregroundStyle(.secondary)
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("系统读取于 " + model.lastRead.formatted(date: .omitted, time: .standard))
+                        Text("每 5 秒检查 · 设备上报可能延迟")
+                    }.font(.caption).foregroundStyle(.secondary)
                     Spacer()
                     Button("刷新") { delegate.refresh(); delegate.updateNotificationState() }
                 }
@@ -317,8 +398,10 @@ struct BatterySettings: View {
         }.frame(width: 470, height: 610)
     }
 }
-if CommandLine.arguments.contains("--check") {
-    for d in readDevices() { print("\(d.label) | \(d.name) | \(d.percent)%") }
+if CommandLine.arguments.contains("--self-test") {
+    runSelfTests()
+} else if CommandLine.arguments.contains("--check") {
+    for d in readDevices() { print("\(d.label) | \(d.percent)% | \(d.powerLabel) | \(d.source)") }
 } else {
     let app = NSApplication.shared
     let delegate = AppDelegate()

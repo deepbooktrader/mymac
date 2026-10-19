@@ -7,7 +7,7 @@
 ## 界面预览
 
 <p align="center">
-  <img src="docs/images/app-window.png" alt="外设电量 v1.1 实际运行截图：设备电量卡片、外观切换与通知设置" width="470">
+  <img src="docs/images/app-window.png" alt="外设电量 v1.2 实际运行截图：设备电量卡片、外观切换与通知设置" width="470">
 </p>
 
 实际运行截图，拍摄于 2026 年 10 月 19 日。截图中的电量与提醒阈值为拍摄时的状态，可在设置中调整。
@@ -16,7 +16,7 @@
 
 - 菜单栏显示设备图标与电量百分比，也可切换名称、电池图标样式。
 - 设置窗口展示设备电量卡片，支持自定义名称。
-- 每 60 秒读取系统电量，Mac 唤醒后刷新，也可手动刷新。
+- 每 5 秒读取系统电量，Mac 唤醒后刷新，也可手动刷新。
 - 默认电量 ≤30% 时提醒，可选择 10%、20%、30%。
 - 低电量数字显示橙色，≤10% 显示红色。
 - 显示通知授权状态，提供开启通知、测试通知与系统设置入口。
@@ -62,9 +62,17 @@ docs/PROJECT_STORY.md            从问题到实现的项目记录
 docs/使用说明.txt                中文使用说明
 ```
 
+## 充电状态与刷新
+
+系统报告正在充电时，菜单栏显示闪电，设备卡片显示绿色充电状态。电量上涨本身不会被当成充电证据；已接电但未充电、已充满与状态未知分别显示。界面显示最近读取系统的时间，这不是外设最后一次采样的时间。
+
+当前版本动态加载 Apple 的 `IOPSCopyPowerSourcesByType` 外设接口。该接口属于公开不受支持的系统接口，可能随系统升级变化；无法访问时降级为电量读取，不猜测充电状态。实现依据：[Apple IOKitUser 源码](https://github.com/apple-oss-distributions/IOKitUser/blob/main/ps.subproj/IOPowerSourcesPrivate.h)。
+
+可运行 `build/PeripheralBattery.app/Contents/MacOS/PeripheralBattery --self-test` 检查充电状态解析规则；真实插拔仍需要实机验证。
+
 ## 实现与限制
 
-使用 AppKit 创建菜单栏项目，SwiftUI 构建设置界面，IOKit 读取 `AppleDeviceManagementHIDEventService` 中的设备电量，UserNotifications 发送提醒，ServiceManagement 管理登录启动。
+使用 AppKit 创建菜单栏项目，SwiftUI 构建设置界面，IOKit 外设电源服务读取设备电量和明确的充电状态；接口不可用时回退到 `AppleDeviceManagementHIDEventService` 电量记录并显示充电状态未知，UserNotifications 发送提醒，ServiceManagement 管理登录启动。
 
 - 电量更新取决于外设向 macOS 上报的频率，不是秒级测量。
 - 主要面向苹果键盘、触控板与鼠标，不承诺支持所有蓝牙设备。
@@ -76,7 +84,9 @@ docs/使用说明.txt                中文使用说明
 ## 验证记录
 
 - Swift 编译、本地代码签名验证通过。
-- 在实际 Mac 上成功读取苹果无线键盘与触控板电量。
+- 在实际 Mac 上成功读取苹果无线键盘与触控板电量，并与系统设置对照一致。
+- 已实测完整插拔：未接线 23% / 电池供电 → 接线 23% / 正在充电 → 拔线 24% / 电池供电；窗口状态同步变化。
+- 状态解析自检通过；数字上涨不会被误判为充电。
 - 使用者已确认菜单栏可见，并认可当前设计。
 - 通知横幅与登录启动的完整行为仍待实际确认，不把代码存在等同于验证完成。
 
