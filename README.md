@@ -10,6 +10,14 @@ mac使用日常中的小痛点
 | --- | --- | --- |
 | [外设电量 · Peripheral Battery](peripheral-battery/) | 一眼查看苹果无线键盘、触控板电量，提前提醒充电 | v1.1，自用版本 |
 
+## 界面预览
+
+<p align="center">
+  <img src="peripheral-battery/docs/images/app-window.png" alt="外设电量实际界面：键盘与触控板电量卡片、菜单栏外观、充电提醒和登录启动设置" width="470">
+</p>
+
+[查看外设电量项目](peripheral-battery/)
+
 ## 第一份记录
 
 2026 年 10 月 19 日，从 Mac mini 的无线外设低电量问题出发，完成了第一个菜单栏工具。
