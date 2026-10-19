@@ -4,7 +4,7 @@ cd "$(dirname "$0")"
 APP="build/PeripheralBattery.app"
 mkdir -p "$APP/Contents/MacOS" build/module-cache
 cp Resources/Info.plist "$APP/Contents/Info.plist"
-xcrun swiftc -swift-version 5 -O -module-cache-path build/module-cache \
+xcrun swiftc -target arm64-apple-macos14.0 -swift-version 5 -O -module-cache-path build/module-cache \
   Sources/PeripheralBattery.swift -o "$APP/Contents/MacOS/PeripheralBattery.new" \
   -framework Cocoa -framework IOKit -framework UserNotifications \
   -framework ServiceManagement -framework SwiftUI
